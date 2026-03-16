@@ -14,7 +14,7 @@
 
 **An interactive terminal UI to lock your macOS Dock to a specific monitor.**
 
-Built with [Ink](https://github.com/vadimdemedes/ink) — the same React-for-CLIs framework used by Claude Code.
+Built with [Ink](https://github.com/vadimdemedes/ink)  (the same React-for-CLIs framework used by Claude Code.)
 
 ---
 
