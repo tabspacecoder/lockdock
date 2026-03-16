@@ -4,49 +4,86 @@ import { render, Box, Text, useApp, useInput } from 'ink';
 import { execSync, spawnSync } from 'child_process';
 
 // ─── macOS guard ─────────────────────────────────────────────
-import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
+import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
 if (process.platform !== 'darwin') {
   console.error('\x1b[31m✖ lock-dock only runs on macOS.\x1b[0m');
   process.exit(1);
 }
 
-// ─── Display Detection ────────────────────────────────────────
-// Uses Swift/osascript to get displays with their CGDisplayID,
-// then sets the primary display via CGDisplaySetMainDisplayID.
-// Setting the primary display is the ONLY reliable way to control
-// which screen macOS puts the Dock on.
+// ─── How macOS moves the Dock ─────────────────────────────────
+//
+// macOS moves the Dock to whichever screen the mouse cursor
+// "pushes against" the bottom edge of. There is no public API,
+// no defaults key, and no private API that reliably does this.
+//
+// The correct approach is to SIMULATE the mouse gesture:
+//   1. Move cursor to the bottom centre of the target screen
+//   2. Keep nudging it downward past the edge
+//   3. macOS detects this and moves the Dock
+//   4. Restore the cursor to its original position
+//
+// Key insight: CGEvent uses CGDisplayBounds coordinates (top-left
+// origin, Y increases downward). The BOTTOM of a screen in CG
+// coordinates is: bounds.origin.y + bounds.height
 
+// Write a Swift script to a temp file and run it
+function runSwift(code) {
+  const tmp = '/tmp/_lockdock_' + Date.now() + '.swift';
+  require('fs').writeFileSync(tmp, code);
+  try {
+    const result = execSync(`swift "${tmp}"`, {
+      encoding: 'utf8',
+      timeout: 20000,
+      env: {
+        ...process.env,
+        PATH: '/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin'
+      }
+    });
+    return result.trim();
+  } finally {
+    try {
+      require('fs').unlinkSync(tmp);
+    } catch {}
+  }
+}
 function getDisplays() {
-  // Use a Swift one-liner via swift -e to enumerate all screens
-  const swiftCode = `
+  const code = `
 import Cocoa
 import CoreGraphics
+
 let screens = NSScreen.screens
 for (i, screen) in screens.enumerated() {
-  let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as! CGDirectDisplayID
-  let isPrimary = (id == CGMainDisplayID())
-  let name = screen.localizedName
-  let w = Int(screen.frame.width)
-  let h = Int(screen.frame.height)
-  print("\\(id)|\\(name)|\\(w)x\\(h)|\\(isPrimary ? "main" : "")")
+    let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as! CGDirectDisplayID
+    let bounds = CGDisplayBounds(id)
+    let isPrimary = (id == CGMainDisplayID())
+    let name = screen.localizedName
+    let w = Int(screen.frame.width)
+    let h = Int(screen.frame.height)
+    // CG bounds (top-left origin, Y down)
+    let bx = Int(bounds.origin.x)
+    let by = Int(bounds.origin.y)
+    let bw = Int(bounds.width)
+    let bh = Int(bounds.height)
+    print("\\(id)|\\(name)|\\(w)x\\(h)|\\(isPrimary ? "1" : "0")|\\(bx)|\\(by)|\\(bw)|\\(bh)")
 }
-`.trim();
+`;
   try {
-    const raw = execSync(`swift -e '${swiftCode.replace(/'/g, "'\\''")}'`, {
-      encoding: 'utf8',
-      timeout: 15000
-    });
-    return raw.trim().split('\n').filter(Boolean).map((line, idx) => {
-      const [id, name, resolution, primary] = line.split('|');
+    const raw = runSwift(code);
+    return raw.split('\n').filter(Boolean).map((line, idx) => {
+      const p = line.split('|');
       return {
-        id: parseInt(id, 10),
-        name: name ?? `Display ${idx + 1}`,
-        resolution: resolution ?? '?',
-        isPrimary: primary === 'main'
+        id: parseInt(p[0], 10),
+        name: p[1] ?? `Display ${idx + 1}`,
+        resolution: p[2] ?? '?',
+        isPrimary: p[3] === '1',
+        cgX: parseInt(p[4], 10),
+        cgY: parseInt(p[5], 10),
+        cgW: parseInt(p[6], 10),
+        cgH: parseInt(p[7], 10)
       };
     });
-  } catch {
-    // Fallback: system_profiler (no IDs, but still useful for display names)
+  } catch (e) {
+    // Swift failed — fall back to system_profiler (display info only)
     try {
       const raw = execSync('system_profiler SPDisplaysDataType -json 2>/dev/null', {
         encoding: 'utf8',
@@ -71,7 +108,6 @@ for (i, screen) in screens.enumerated() {
   }
 }
 function getCurrentPin() {
-  // The primary display name is the ground truth — that's where the Dock lives
   try {
     const displays = getDisplays();
     const primary = displays.find(d => d.isPrimary);
@@ -81,85 +117,61 @@ function getCurrentPin() {
   }
 }
 function setDockDisplay(display) {
-  if (display.id == null) {
-    throw new Error('Display ID not available — cannot set primary display.');
+  if (display.cgX == null || display.cgW == null) {
+    throw new Error('Cannot get display coordinates. Make sure Xcode Command Line Tools are installed:\n  xcode-select --install');
   }
 
-  // Use a Swift snippet to set the main display via private SkyLight API.
-  // This is the same mechanism System Preferences uses.
-  const swiftCode = `
+  // Centre-bottom of target screen in CG coordinates
+  const centreX = display.cgX + Math.floor(display.cgW / 2);
+  // In CG coords: Y increases downward. Bottom of screen = cgY + cgH.
+  // We move to just inside the bottom, then past it.
+  const insideY = display.cgY + display.cgH - 2; // 2px from bottom
+  const outsideY = display.cgY + display.cgH + 20; // 20px past bottom edge
+
+  const code = `
 import Cocoa
 import CoreGraphics
 
-@_silgen_name("CGSSetMainDisplayID")
-func CGSSetMainDisplayID(_ displayID: CGDirectDisplayID)
-
-let targetID: CGDirectDisplayID = ${display.id}
-CGDisplayConfigRef.withUnsafeMutablePointer { _ in }
-var configRef: CGDisplayConfigRef?
-CGBeginDisplayConfiguration(&configRef)
-CGConfigureDisplayOrigin(configRef, targetID, 0, 0)
-CGSSetMainDisplayID(targetID)
-CGCompleteDisplayConfiguration(configRef, .permanently)
-`.trim();
-  try {
-    execSync(`swift -e '${swiftCode.replace(/'/g, "'\\''")}'`, {
-      encoding: 'utf8',
-      timeout: 15000
-    });
-  } catch {
-    // CGSSetMainDisplayID approach may fail on newer macOS.
-    // Fall back: use AppleScript to click "Main Display" in System Settings
-    // which is the most reliable non-private approach available.
-    setDockDisplayViaAppleScript(display.name);
-  }
-  spawnSync('killall', ['Dock']);
+func warp(_ x: CGFloat, _ y: CGFloat) {
+    // CGWarpMouseCursorPosition moves the cursor without generating events
+    // CGDisplayMoveCursorToPoint also works
+    let pt = CGPoint(x: x, y: y)
+    CGWarpMouseCursorPosition(pt)
+    // Also post a real mouse-moved event so the Dock notices
+    if let src = CGEventSource(stateID: .combinedSessionState) {
+        let ev = CGEvent(mouseEventSource: src, mouseType: .mouseMoved, mouseCursorPosition: pt, mouseButton: .left)
+        ev?.post(tap: .cghidEventTap)
+    }
+    Thread.sleep(forTimeInterval: 0.08)
 }
-function setDockDisplayViaAppleScript(displayName) {
-  // AppleScript approach: open Displays arrangement and move the menu bar
-  // This is a UI-scripting fallback — requires Accessibility permissions
-  const script = `
-tell application "System Events"
-  tell process "System Preferences"
-    -- fallback: open displays pref pane
-  end tell
-end tell
-`.trim();
-  // If Swift private API fails, we use the most reliable fallback:
-  // write the prefer-display-for-dock key AND move the main display
-  // via displayplacer if available, otherwise inform the user
-  const hasDisplayplacer = (() => {
-    try {
-      execSync('which displayplacer', {
-        timeout: 2000
-      });
-      return true;
-    } catch {
-      return false;
-    }
-  })();
-  if (hasDisplayplacer) {
-    // Get displayplacer ID for this display and set it as main
-    const dpOut = execSync('displayplacer list 2>/dev/null', {
-      encoding: 'utf8',
-      timeout: 5000
-    });
-    const match = dpOut.match(new RegExp(`id:([A-Fa-f0-9-]+)[^\\n]*${displayName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
-    if (match) {
-      execSync(`displayplacer "id:${match[1]} degree:0 enabled:true scaling:on" "origin:(0,0) hz:0"`);
-    }
-  } else {
-    // Last resort: prefer-display-for-dock defaults key + killall Dock
-    // This works on some macOS versions
-    execSync(`defaults write com.apple.dock "prefer-display-for-dock" -string "${displayName.replace(/"/g, '\\"')}"`);
-  }
+
+// Save current position
+let saved = NSEvent.mouseLocation
+// NSEvent uses bottom-left origin; convert to CG (top-left) coords
+let screenH = CGDisplayBounds(CGMainDisplayID()).height
+let savedCG = CGPoint(x: saved.x, y: screenH - saved.y)
+
+// Move to bottom-centre of target screen, inside edge
+warp(${centreX}, ${insideY})
+// Nudge past the bottom edge — this triggers the Dock to move
+warp(${centreX}, ${outsideY})
+Thread.sleep(forTimeInterval: 0.4)
+// Move back inside so Dock settles
+warp(${centreX}, ${insideY})
+Thread.sleep(forTimeInterval: 0.3)
+
+// Restore original cursor position
+warp(savedCG.x, savedCG.y)
+`;
+  runSwift(code);
 }
 function resetDockPin() {
-  // Reset means: make the built-in display (or first display) primary
   try {
-    execSync('defaults delete com.apple.dock prefer-display-for-dock 2>/dev/null');
+    const displays = getDisplays();
+    // Prefer built-in MacBook screen, else first display
+    const target = displays.find(d => d.name?.toLowerCase().includes('built-in') || d.name?.toLowerCase().includes('retina') || d.name?.toLowerCase().includes('macbook')) ?? displays[0];
+    if (target) setDockDisplay(target);
   } catch {}
-  spawnSync('killall', ['Dock']);
 }
 
 // ─── Theme ───────────────────────────────────────────────────
@@ -432,40 +444,80 @@ function SetScreen({
       }
     }
   });
-  if (done) return /*#__PURE__*/_jsxs(Box, {
-    flexDirection: "column",
-    paddingLeft: 2,
-    children: [/*#__PURE__*/_jsx(Box, {
-      marginBottom: 1,
-      children: /*#__PURE__*/_jsx(Text, {
-        bold: true,
-        color: C.green,
-        children: "  \u2714 Dock locked!"
-      })
-    }), /*#__PURE__*/_jsxs(Box, {
+  if (done) {
+    const isError = done.startsWith('ERROR:');
+    const needsXcode = done.includes('xcode-select') || done.includes('coordinates');
+    return /*#__PURE__*/_jsxs(Box, {
+      flexDirection: "column",
       paddingLeft: 2,
-      children: [/*#__PURE__*/_jsx(Text, {
-        color: C.white,
-        children: "Pinned to "
-      }), /*#__PURE__*/_jsx(Text, {
-        color: C.accent,
-        bold: true,
-        children: done
+      children: [isError ? /*#__PURE__*/_jsxs(_Fragment, {
+        children: [/*#__PURE__*/_jsx(Box, {
+          marginBottom: 1,
+          children: /*#__PURE__*/_jsx(Text, {
+            bold: true,
+            color: C.yellow,
+            children: "  \u26A0 Could not switch Dock"
+          })
+        }), /*#__PURE__*/_jsx(Box, {
+          paddingLeft: 2,
+          flexDirection: "column",
+          children: needsXcode ? /*#__PURE__*/_jsxs(_Fragment, {
+            children: [/*#__PURE__*/_jsx(Text, {
+              color: C.white,
+              children: "Lock Dock needs Xcode Command Line Tools."
+            }), /*#__PURE__*/_jsx(Box, {
+              marginTop: 1,
+              children: /*#__PURE__*/_jsx(Text, {
+                color: C.muted,
+                children: "Install them and try again:"
+              })
+            }), /*#__PURE__*/_jsx(Box, {
+              marginTop: 1,
+              paddingLeft: 1,
+              children: /*#__PURE__*/_jsx(Text, {
+                color: C.green,
+                children: "xcode-select --install"
+              })
+            })]
+          }) : /*#__PURE__*/_jsx(Text, {
+            color: C.muted,
+            children: done.replace('ERROR: ', '')
+          })
+        })]
+      }) : /*#__PURE__*/_jsxs(_Fragment, {
+        children: [/*#__PURE__*/_jsx(Box, {
+          marginBottom: 1,
+          children: /*#__PURE__*/_jsx(Text, {
+            bold: true,
+            color: C.green,
+            children: "  \u2714 Dock moved!"
+          })
+        }), /*#__PURE__*/_jsxs(Box, {
+          paddingLeft: 2,
+          children: [/*#__PURE__*/_jsx(Text, {
+            color: C.white,
+            children: "Now on "
+          }), /*#__PURE__*/_jsx(Text, {
+            color: C.accent,
+            bold: true,
+            children: done
+          })]
+        }), /*#__PURE__*/_jsx(Box, {
+          marginTop: 1,
+          paddingLeft: 2,
+          children: /*#__PURE__*/_jsx(Text, {
+            color: C.muted,
+            children: "The Dock is now on this display."
+          })
+        })]
+      }), /*#__PURE__*/_jsx(Box, {
+        marginTop: 1,
+        children: /*#__PURE__*/_jsx(Divider, {})
+      }), /*#__PURE__*/_jsx(Keys, {
+        keys: ['↵ / esc  back']
       })]
-    }), /*#__PURE__*/_jsx(Box, {
-      marginTop: 1,
-      paddingLeft: 2,
-      children: /*#__PURE__*/_jsx(Text, {
-        color: C.muted,
-        children: "Set as primary display. The Dock will now appear here."
-      })
-    }), /*#__PURE__*/_jsx(Box, {
-      marginTop: 1,
-      children: /*#__PURE__*/_jsx(Divider, {})
-    }), /*#__PURE__*/_jsx(Keys, {
-      keys: ['↵ / esc  back']
-    })]
-  });
+    });
+  }
   if (displays.length === 0) return /*#__PURE__*/_jsxs(Box, {
     flexDirection: "column",
     paddingLeft: 2,
@@ -540,7 +592,7 @@ function ResetScreen({
     children: [/*#__PURE__*/_jsx(Text, {
       bold: true,
       color: C.green,
-      children: "  \u2714 Pin removed. Dock will follow cursor."
+      children: "  \u2714 Done. Dock moved to built-in display."
     }), /*#__PURE__*/_jsx(Box, {
       marginTop: 1,
       children: /*#__PURE__*/_jsx(Divider, {})
@@ -556,14 +608,14 @@ function ResetScreen({
       children: /*#__PURE__*/_jsx(Text, {
         bold: true,
         color: C.yellow,
-        children: "  \u21BA Reset Dock pin?"
+        children: "  \u21BA Move Dock to built-in display?"
       })
     }), /*#__PURE__*/_jsx(Divider, {}), /*#__PURE__*/_jsx(Box, {
       marginTop: 1,
       paddingLeft: 2,
       children: /*#__PURE__*/_jsx(Text, {
         color: C.muted,
-        children: "Removes the pinned display \u2014 Dock will follow cursor again."
+        children: "Moves the Dock back to your built-in / primary screen."
       })
     }), /*#__PURE__*/_jsxs(Box, {
       marginTop: 2,
