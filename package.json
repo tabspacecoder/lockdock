@@ -1,0 +1,31 @@
+{
+  "name": "lock-dock",
+  "version": "1.0.0",
+  "description": "Interactive TUI to lock the macOS Dock to a chosen monitor",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "lock-dock": "./bin/lock-dock.js"
+  },
+  "scripts": {
+    "build": "babel index.js -o dist/index.js",
+    "start": "node dist/index.js",
+    "prepare": "mkdir -p dist && babel index.js -o dist/index.js"
+  },
+  "keywords": ["macos", "dock", "monitor", "display", "cli", "tui"],
+  "license": "ISC",
+  "dependencies": {
+    "ink": "^6.8.0",
+    "ink-select-input": "^6.2.0",
+    "ink-spinner": "^5.0.0",
+    "ink-text-input": "^6.0.0",
+    "react": "^19.2.4"
+  },
+  "devDependencies": {
+    "@babel/cli": "^7.28.6",
+    "@babel/core": "^7.29.0",
+    "@babel/node": "^7.29.0",
+    "@babel/preset-env": "^7.29.0",
+    "@babel/preset-react": "^7.28.5"
+  }
+}
