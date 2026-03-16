@@ -1,10 +1,16 @@
 #!/usr/bin/env node
-import React, { useState, useEffect, useCallback } from 'react';
-import { render, Box, Text, useApp, useInput, useFocus } from 'ink';
+import React, { useState, useCallback } from 'react';
+import { render, Box, Text, useApp, useInput } from 'ink';
 import { execSync, spawnSync } from 'child_process';
 
-// ─── Display Detection ────────────────────────────────────────
+// ─── macOS guard ─────────────────────────────────────────────
 import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
+if (process.platform !== 'darwin') {
+  console.error('\x1b[31m✖ lock-dock only runs on macOS.\x1b[0m');
+  process.exit(1);
+}
+
+// ─── Display Detection ────────────────────────────────────────
 function getDisplays() {
   try {
     const raw = execSync('system_profiler SPDisplaysDataType -json 2>/dev/null', {
@@ -19,7 +25,7 @@ function getDisplays() {
           name: mon._name ?? 'Unknown Display',
           resolution: mon.spdisplays_resolution ?? '?',
           isPrimary: mon.spdisplays_main === 'spdisplays_yes',
-          retina: mon.spdisplays_pixelresolution != null
+          retina: !!mon.spdisplays_pixelresolution
         });
       }
     }
@@ -49,70 +55,91 @@ function resetDockPin() {
   spawnSync('killall', ['Dock']);
 }
 
-// ─── Colours / theme ─────────────────────────────────────────
+// ─── Theme ───────────────────────────────────────────────────
 const C = {
   accent: '#FF6B35',
-  // warm orange — like a dock
   dim: '#555566',
   muted: '#888899',
   white: '#F0EEF8',
   green: '#50FA7B',
   blue: '#8BE9FD',
-  yellow: '#FFD580',
-  selected: '#FF6B35',
-  bg: '#0D0C10'
+  yellow: '#FFD580'
 };
 
-// ─── Components ───────────────────────────────────────────────
-
-const Divider = ({
-  width = 52,
-  color = C.dim
-}) => /*#__PURE__*/_jsx(Text, {
-  color: color,
-  children: '─'.repeat(width)
+// ─── Shared Components ────────────────────────────────────────
+const Divider = () => /*#__PURE__*/_jsx(Text, {
+  color: C.dim,
+  children: '─'.repeat(48)
 });
-const Logo = () => /*#__PURE__*/_jsxs(Box, {
+const Header = () => /*#__PURE__*/_jsxs(Box, {
   flexDirection: "column",
   marginBottom: 1,
   children: [/*#__PURE__*/_jsx(Text, {
     bold: true,
     color: C.accent,
-    children: "  \u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557"
+    children: "  ╔═══════════════════════════════════════════════════════════════════════╗"
   }), /*#__PURE__*/_jsxs(Text, {
     bold: true,
     color: C.accent,
-    children: ["  \u2551  ", /*#__PURE__*/_jsx(Text, {
+    children: ["  ║ ", /*#__PURE__*/_jsx(Text, {
       color: C.white,
-      bold: true,
-      children: "\uD83D\uDDA5  Lock Dock"
-    }), /*#__PURE__*/_jsx(Text, {
-      color: C.accent,
-      children: "                    \u2551"
-    })]
+      children: "██╗      ██████╗  ██████╗██╗  ██╗   ██████╗  ██████╗  ██████╗██╗  ██╗"
+    }), " ║"]
   }), /*#__PURE__*/_jsxs(Text, {
     bold: true,
     color: C.accent,
-    children: ["  \u2551  ", /*#__PURE__*/_jsx(Text, {
+    children: ["  ║ ", /*#__PURE__*/_jsx(Text, {
+      color: C.white,
+      children: "██║     ██╔═══██╗██╔════╝██║ ██╔╝   ██╔══██╗██╔═══██╗██╔════╝██║ ██╔╝"
+    }), " ║"]
+  }), /*#__PURE__*/_jsxs(Text, {
+    bold: true,
+    color: C.accent,
+    children: ["  ║ ", /*#__PURE__*/_jsx(Text, {
+      color: C.white,
+      children: "██║     ██║   ██║██║     █████╔╝    ██║  ██║██║   ██║██║     █████╔╝ "
+    }), " ║"]
+  }), /*#__PURE__*/_jsxs(Text, {
+    bold: true,
+    color: C.accent,
+    children: ["  ║ ", /*#__PURE__*/_jsx(Text, {
+      color: C.white,
+      children: "██║     ██║   ██║██║     ██╔═██╗    ██║  ██║██║   ██║██║     ██╔═██╗ "
+    }), " ║"]
+  }), /*#__PURE__*/_jsxs(Text, {
+    bold: true,
+    color: C.accent,
+    children: ["  ║ ", /*#__PURE__*/_jsx(Text, {
+      color: C.white,
+      children: "███████╗╚██████╔╝╚██████╗██║  ██╗   ██████╔╝╚██████╔╝╚██████╗██║  ██╗"
+    }), " ║"]
+  }), /*#__PURE__*/_jsxs(Text, {
+    bold: true,
+    color: C.accent,
+    children: ["  ║ ", /*#__PURE__*/_jsx(Text, {
+      color: C.white,
+      children: "╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝   ╚═════╝  ╚═════╝  ╚═════╝╚═╝  ╚═╝"
+    }), " ║"]
+  }), /*#__PURE__*/_jsxs(Text, {
+    bold: true,
+    color: C.accent,
+    children: ["  ║ ", /*#__PURE__*/_jsx(Text, {
       color: C.muted,
-      children: "Pin your Dock to any monitor"
-    }), /*#__PURE__*/_jsx(Text, {
-      color: C.accent,
-      children: "   \u2551"
-    })]
+      children: "Lock Dock • Pin your Dock to any monitor"
+    }), "                              ║"]
   }), /*#__PURE__*/_jsx(Text, {
     bold: true,
     color: C.accent,
-    children: "  \u255A\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255D"
+    children: "  ╚═══════════════════════════════════════════════════════════════════════╝"
   })]
 });
-const StatusBar = ({
+const PinStatus = ({
   pin
 }) => /*#__PURE__*/_jsxs(Box, {
   marginTop: 1,
   children: [/*#__PURE__*/_jsx(Text, {
     color: C.dim,
-    children: "  Dock \u2192 "
+    children: "  Dock pinned to: "
   }), pin ? /*#__PURE__*/_jsx(Text, {
     color: C.green,
     bold: true,
@@ -120,12 +147,21 @@ const StatusBar = ({
   }) : /*#__PURE__*/_jsx(Text, {
     color: C.muted,
     italic: true,
-    children: "follows cursor (default)"
+    children: "not pinned (follows cursor)"
   })]
 });
+const Keys = ({
+  keys
+}) => /*#__PURE__*/_jsx(Box, {
+  marginTop: 1,
+  children: keys.map((k, i) => /*#__PURE__*/_jsxs(Text, {
+    color: C.dim,
+    children: ["  ", k]
+  }, i))
+});
 
-// ─── SCREEN: Home / Menu ──────────────────────────────────────
-const MENU_ITEMS = [{
+// ─── HOME SCREEN ─────────────────────────────────────────────
+const MENU = [{
   id: 'list',
   icon: '◈',
   label: 'List displays',
@@ -139,7 +175,7 @@ const MENU_ITEMS = [{
   id: 'reset',
   icon: '↺',
   label: 'Reset / Unpin',
-  desc: 'Let Dock follow cursor'
+  desc: 'Dock follows cursor'
 }, {
   id: 'status',
   icon: '◎',
@@ -151,37 +187,31 @@ const MENU_ITEMS = [{
   label: 'Quit',
   desc: ''
 }];
-const HomeScreen = ({
+function HomeScreen({
   onSelect,
   pin
-}) => {
+}) {
   const [cursor, setCursor] = useState(0);
   const {
     exit
   } = useApp();
   useInput((input, key) => {
     if (key.upArrow) setCursor(c => Math.max(0, c - 1));
-    if (key.downArrow) setCursor(c => Math.min(MENU_ITEMS.length - 1, c + 1));
+    if (key.downArrow) setCursor(c => Math.min(MENU.length - 1, c + 1));
     if (key.return || input === ' ') {
-      const item = MENU_ITEMS[cursor];
+      const item = MENU[cursor];
       if (item.id === 'quit') exit();else onSelect(item.id);
     }
     if (input === 'q') exit();
-    // number shortcuts
-    const n = parseInt(input);
-    if (n >= 1 && n <= MENU_ITEMS.length) {
-      const item = MENU_ITEMS[n - 1];
-      if (item.id === 'quit') exit();else onSelect(item.id);
-    }
   });
   return /*#__PURE__*/_jsxs(Box, {
     flexDirection: "column",
     paddingLeft: 2,
-    children: [/*#__PURE__*/_jsx(Logo, {}), /*#__PURE__*/_jsx(Divider, {}), /*#__PURE__*/_jsx(Box, {
+    children: [/*#__PURE__*/_jsx(Header, {}), /*#__PURE__*/_jsx(Divider, {}), /*#__PURE__*/_jsx(Box, {
       flexDirection: "column",
       marginTop: 1,
       marginBottom: 1,
-      children: MENU_ITEMS.map((item, i) => {
+      children: MENU.map((item, i) => {
         const active = cursor === i;
         return /*#__PURE__*/_jsxs(Box, {
           paddingLeft: 1,
@@ -199,28 +229,18 @@ const HomeScreen = ({
           }) : null]
         }, item.id);
       })
-    }), /*#__PURE__*/_jsx(Divider, {}), /*#__PURE__*/_jsx(StatusBar, {
+    }), /*#__PURE__*/_jsx(Divider, {}), /*#__PURE__*/_jsx(PinStatus, {
       pin: pin
-    }), /*#__PURE__*/_jsxs(Box, {
-      marginTop: 1,
-      children: [/*#__PURE__*/_jsx(Text, {
-        color: C.dim,
-        children: "  \u2191\u2193 navigate  "
-      }), /*#__PURE__*/_jsx(Text, {
-        color: C.dim,
-        children: "enter select  "
-      }), /*#__PURE__*/_jsx(Text, {
-        color: C.dim,
-        children: "q quit"
-      })]
+    }), /*#__PURE__*/_jsx(Keys, {
+      keys: ['↑↓ navigate', 'enter select', 'q quit']
     })]
   });
-};
+}
 
-// ─── SCREEN: Display List ─────────────────────────────────────
-const ListScreen = ({
+// ─── LIST SCREEN ─────────────────────────────────────────────
+function ListScreen({
   onBack
-}) => {
+}) {
   const [displays] = useState(() => getDisplays());
   useInput((_, key) => {
     if (key.escape || key.return) onBack();
@@ -262,37 +282,29 @@ const ListScreen = ({
           color: C.muted,
           children: "  Retina"
         })]
-      }), /*#__PURE__*/_jsx(Box, {
-        paddingLeft: 7,
-        children: /*#__PURE__*/_jsx(Text, {
-          color: C.muted,
-          children: d.resolution
-        })
+      }), /*#__PURE__*/_jsxs(Text, {
+        color: C.muted,
+        children: ['       ', d.resolution]
       })]
     }, i)), /*#__PURE__*/_jsx(Box, {
       marginTop: 1,
       children: /*#__PURE__*/_jsx(Divider, {})
-    }), /*#__PURE__*/_jsx(Box, {
-      marginTop: 1,
-      children: /*#__PURE__*/_jsx(Text, {
-        color: C.dim,
-        children: "  \u21B5 / esc  back to menu"
-      })
+    }), /*#__PURE__*/_jsx(Keys, {
+      keys: ['↵ / esc  back']
     })]
   });
-};
+}
 
-// ─── SCREEN: Set Display ──────────────────────────────────────
-const SetScreen = ({
+// ─── SET SCREEN ──────────────────────────────────────────────
+function SetScreen({
   onBack,
   onSuccess
-}) => {
+}) {
   const [displays] = useState(() => getDisplays());
   const [cursor, setCursor] = useState(0);
   const [done, setDone] = useState(null);
-  const [working, setWorking] = useState(false);
   useInput((input, key) => {
-    if (done || working) {
+    if (done) {
       if (key.return || key.escape) onBack();
       return;
     }
@@ -303,7 +315,6 @@ const SetScreen = ({
     if (key.upArrow) setCursor(c => Math.max(0, c - 1));
     if (key.downArrow) setCursor(c => Math.min(displays.length - 1, c + 1));
     if (key.return || input === ' ') {
-      setWorking(true);
       const chosen = displays[cursor];
       try {
         setDockDisplay(chosen.name);
@@ -312,7 +323,6 @@ const SetScreen = ({
       } catch (e) {
         setDone('ERROR: ' + e.message);
       }
-      setWorking(false);
     }
   });
   if (done) return /*#__PURE__*/_jsxs(Box, {
@@ -340,17 +350,13 @@ const SetScreen = ({
       paddingLeft: 2,
       children: /*#__PURE__*/_jsx(Text, {
         color: C.muted,
-        children: "The Dock restarted and will now stay on this display."
+        children: "Dock restarted. It will now stay on this display."
       })
     }), /*#__PURE__*/_jsx(Box, {
       marginTop: 1,
       children: /*#__PURE__*/_jsx(Divider, {})
-    }), /*#__PURE__*/_jsx(Box, {
-      marginTop: 1,
-      children: /*#__PURE__*/_jsx(Text, {
-        color: C.dim,
-        children: "  \u21B5 / esc  back"
-      })
+    }), /*#__PURE__*/_jsx(Keys, {
+      keys: ['↵ / esc  back']
     })]
   });
   if (displays.length === 0) return /*#__PURE__*/_jsxs(Box, {
@@ -359,12 +365,8 @@ const SetScreen = ({
     children: [/*#__PURE__*/_jsx(Text, {
       color: C.yellow,
       children: "  No displays detected."
-    }), /*#__PURE__*/_jsx(Box, {
-      marginTop: 1,
-      children: /*#__PURE__*/_jsx(Text, {
-        color: C.dim,
-        children: "  esc  back"
-      })
+    }), /*#__PURE__*/_jsx(Keys, {
+      keys: ['esc  back']
     })]
   });
   return /*#__PURE__*/_jsxs(Box, {
@@ -375,7 +377,7 @@ const SetScreen = ({
       children: /*#__PURE__*/_jsx(Text, {
         bold: true,
         color: C.accent,
-        children: "  \u2295 Choose a display"
+        children: "  \u2295 Choose a display to lock Dock to"
       })
     }), /*#__PURE__*/_jsx(Divider, {}), displays.map((d, i) => {
       const active = cursor === i;
@@ -401,27 +403,17 @@ const SetScreen = ({
     }), /*#__PURE__*/_jsx(Box, {
       marginTop: 1,
       children: /*#__PURE__*/_jsx(Divider, {})
-    }), /*#__PURE__*/_jsxs(Box, {
-      marginTop: 1,
-      children: [/*#__PURE__*/_jsx(Text, {
-        color: C.dim,
-        children: "  \u2191\u2193 navigate  "
-      }), /*#__PURE__*/_jsx(Text, {
-        color: C.dim,
-        children: "enter select  "
-      }), /*#__PURE__*/_jsx(Text, {
-        color: C.dim,
-        children: "esc back"
-      })]
+    }), /*#__PURE__*/_jsx(Keys, {
+      keys: ['↑↓ navigate', 'enter select', 'esc back']
     })]
   });
-};
+}
 
-// ─── SCREEN: Reset ────────────────────────────────────────────
-const ResetScreen = ({
+// ─── RESET SCREEN ────────────────────────────────────────────
+function ResetScreen({
   onBack,
   onReset
-}) => {
+}) {
   const [done, setDone] = useState(false);
   useInput((input, key) => {
     if (done) {
@@ -445,12 +437,8 @@ const ResetScreen = ({
     }), /*#__PURE__*/_jsx(Box, {
       marginTop: 1,
       children: /*#__PURE__*/_jsx(Divider, {})
-    }), /*#__PURE__*/_jsx(Box, {
-      marginTop: 1,
-      children: /*#__PURE__*/_jsx(Text, {
-        color: C.dim,
-        children: "  \u21B5  back"
-      })
+    }), /*#__PURE__*/_jsx(Keys, {
+      keys: ['↵  back']
     })]
   });
   return /*#__PURE__*/_jsxs(Box, {
@@ -468,43 +456,37 @@ const ResetScreen = ({
       paddingLeft: 2,
       children: /*#__PURE__*/_jsx(Text, {
         color: C.muted,
-        children: "This removes the pinned display and restores"
-      })
-    }), /*#__PURE__*/_jsx(Box, {
-      paddingLeft: 2,
-      children: /*#__PURE__*/_jsx(Text, {
-        color: C.muted,
-        children: "the default macOS behaviour (Dock follows cursor)."
+        children: "Removes the pinned display \u2014 Dock will follow cursor again."
       })
     }), /*#__PURE__*/_jsxs(Box, {
       marginTop: 2,
       paddingLeft: 2,
       children: [/*#__PURE__*/_jsx(Text, {
         color: C.white,
-        children: "Confirm? "
+        children: "Confirm?  "
       }), /*#__PURE__*/_jsx(Text, {
         color: C.green,
         bold: true,
         children: "[y]"
       }), /*#__PURE__*/_jsx(Text, {
         color: C.white,
-        children: " yes   "
+        children: " yes    "
       }), /*#__PURE__*/_jsx(Text, {
         color: C.dim,
-        children: "[n]"
+        children: "[n] / esc"
       }), /*#__PURE__*/_jsx(Text, {
         color: C.muted,
-        children: " no"
+        children: " cancel"
       })]
     })]
   });
-};
+}
 
-// ─── SCREEN: Status ───────────────────────────────────────────
-const StatusScreen = ({
+// ─── STATUS SCREEN ───────────────────────────────────────────
+function StatusScreen({
   onBack,
   pin
-}) => {
+}) {
   useInput((_, key) => {
     if (key.escape || key.return) onBack();
   });
@@ -536,18 +518,14 @@ const StatusScreen = ({
     }), /*#__PURE__*/_jsx(Box, {
       marginTop: 1,
       children: /*#__PURE__*/_jsx(Divider, {})
-    }), /*#__PURE__*/_jsx(Box, {
-      marginTop: 1,
-      children: /*#__PURE__*/_jsx(Text, {
-        color: C.dim,
-        children: "  \u21B5 / esc  back"
-      })
+    }), /*#__PURE__*/_jsx(Keys, {
+      keys: ['↵ / esc  back']
     })]
   });
-};
+}
 
-// ─── Root App ─────────────────────────────────────────────────
-const App = () => {
+// ─── ROOT APP ────────────────────────────────────────────────
+function App() {
   const [screen, setScreen] = useState('home');
   const [pin, setPin] = useState(() => getCurrentPin());
   const goHome = useCallback(() => setScreen('home'), []);
@@ -556,7 +534,9 @@ const App = () => {
   });
   if (screen === 'set') return /*#__PURE__*/_jsx(SetScreen, {
     onBack: goHome,
-    onSuccess: n => setPin(n)
+    onSuccess: n => {
+      setPin(n);
+    }
   });
   if (screen === 'reset') return /*#__PURE__*/_jsx(ResetScreen, {
     onBack: goHome,
@@ -570,12 +550,5 @@ const App = () => {
     onSelect: setScreen,
     pin: pin
   });
-};
-
-// ─── Entry ────────────────────────────────────────────────────
-const isMac = process.platform === 'darwin';
-if (!isMac) {
-  console.error('\x1b[31m✖ lock-dock only runs on macOS.\x1b[0m');
-  process.exit(1);
 }
 render(/*#__PURE__*/_jsx(App, {}));
