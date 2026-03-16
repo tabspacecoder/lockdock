@@ -65,7 +65,7 @@ lock-dock
 | Screen | What it does |
 |---|---|
 | **List displays** | Shows all connected monitors with resolution and primary indicator |
-| **Lock Dock** | Arrow-key picker — choose a monitor, Dock restarts instantly |
+| **Lock Dock** | Arrow-key picker > choose a monitor, Dock restarts instantly |
 | **Reset / Unpin** | Confirms then removes the pin, restoring macOS default behaviour |
 | **Status** | Shows which display the Dock is currently pinned to |
 
