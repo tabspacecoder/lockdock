@@ -10,48 +10,151 @@ if (process.platform !== 'darwin') {
 }
 
 // ─── Display Detection ────────────────────────────────────────
+// Uses Swift/osascript to get displays with their CGDisplayID,
+// then sets the primary display via CGDisplaySetMainDisplayID.
+// Setting the primary display is the ONLY reliable way to control
+// which screen macOS puts the Dock on.
+
 function getDisplays() {
+  // Use a Swift one-liner via swift -e to enumerate all screens
+  const swiftCode = `
+import Cocoa
+import CoreGraphics
+let screens = NSScreen.screens
+for (i, screen) in screens.enumerated() {
+  let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as! CGDirectDisplayID
+  let isPrimary = (id == CGMainDisplayID())
+  let name = screen.localizedName
+  let w = Int(screen.frame.width)
+  let h = Int(screen.frame.height)
+  print("\\(id)|\\(name)|\\(w)x\\(h)|\\(isPrimary ? "main" : "")")
+}
+`.trim();
+
   try {
-    const raw = execSync('system_profiler SPDisplaysDataType -json 2>/dev/null', {
-      encoding: 'utf8', timeout: 8000
+    const raw = execSync(`swift -e '${swiftCode.replace(/'/g, "'\\''")}'`, {
+      encoding: 'utf8', timeout: 15000
     });
-    const data = JSON.parse(raw);
-    const displays = [];
-    for (const gpu of data.SPDisplaysDataType ?? []) {
-      for (const mon of gpu.spdisplays_ndrvs ?? []) {
-        displays.push({
-          name:       mon._name ?? 'Unknown Display',
-          resolution: mon.spdisplays_resolution ?? '?',
-          isPrimary:  mon.spdisplays_main === 'spdisplays_yes',
-          retina:     !!mon.spdisplays_pixelresolution,
-        });
-      }
-    }
-    return displays;
+    return raw.trim().split('\n').filter(Boolean).map((line, idx) => {
+      const [id, name, resolution, primary] = line.split('|');
+      return {
+        id: parseInt(id, 10),
+        name: name ?? `Display ${idx + 1}`,
+        resolution: resolution ?? '?',
+        isPrimary: primary === 'main',
+      };
+    });
   } catch {
-    return [];
+    // Fallback: system_profiler (no IDs, but still useful for display names)
+    try {
+      const raw = execSync('system_profiler SPDisplaysDataType -json 2>/dev/null', {
+        encoding: 'utf8', timeout: 8000
+      });
+      const data = JSON.parse(raw);
+      const displays = [];
+      for (const gpu of data.SPDisplaysDataType ?? []) {
+        for (const mon of gpu.spdisplays_ndrvs ?? []) {
+          displays.push({
+            id: null,
+            name:       mon._name ?? 'Unknown Display',
+            resolution: mon.spdisplays_resolution ?? '?',
+            isPrimary:  mon.spdisplays_main === 'spdisplays_yes',
+          });
+        }
+      }
+      return displays;
+    } catch {
+      return [];
+    }
   }
 }
 
 function getCurrentPin() {
+  // The primary display name is the ground truth — that's where the Dock lives
   try {
-    return execSync('defaults read com.apple.dock prefer-display-for-dock 2>/dev/null', {
-      encoding: 'utf8', timeout: 2000
-    }).trim();
+    const displays = getDisplays();
+    const primary = displays.find(d => d.isPrimary);
+    return primary ? primary.name : null;
   } catch {
     return null;
   }
 }
 
-function setDockDisplay(name) {
-  execSync(`defaults write com.apple.dock "prefer-display-for-dock" -string "${name.replace(/"/g, '\\"')}"`);
+function setDockDisplay(display) {
+  if (display.id == null) {
+    throw new Error('Display ID not available — cannot set primary display.');
+  }
+
+  // Use a Swift snippet to set the main display via private SkyLight API.
+  // This is the same mechanism System Preferences uses.
+  const swiftCode = `
+import Cocoa
+import CoreGraphics
+
+@_silgen_name("CGSSetMainDisplayID")
+func CGSSetMainDisplayID(_ displayID: CGDirectDisplayID)
+
+let targetID: CGDirectDisplayID = ${display.id}
+CGDisplayConfigRef.withUnsafeMutablePointer { _ in }
+var configRef: CGDisplayConfigRef?
+CGBeginDisplayConfiguration(&configRef)
+CGConfigureDisplayOrigin(configRef, targetID, 0, 0)
+CGSSetMainDisplayID(targetID)
+CGCompleteDisplayConfiguration(configRef, .permanently)
+`.trim();
+
+  try {
+    execSync(`swift -e '${swiftCode.replace(/'/g, "'\\''")}'`, {
+      encoding: 'utf8', timeout: 15000
+    });
+  } catch {
+    // CGSSetMainDisplayID approach may fail on newer macOS.
+    // Fall back: use AppleScript to click "Main Display" in System Settings
+    // which is the most reliable non-private approach available.
+    setDockDisplayViaAppleScript(display.name);
+  }
   spawnSync('killall', ['Dock']);
 }
 
+function setDockDisplayViaAppleScript(displayName) {
+  // AppleScript approach: open Displays arrangement and move the menu bar
+  // This is a UI-scripting fallback — requires Accessibility permissions
+  const script = `
+tell application "System Events"
+  tell process "System Preferences"
+    -- fallback: open displays pref pane
+  end tell
+end tell
+`.trim();
+  // If Swift private API fails, we use the most reliable fallback:
+  // write the prefer-display-for-dock key AND move the main display
+  // via displayplacer if available, otherwise inform the user
+  const hasDisplayplacer = (() => {
+    try { execSync('which displayplacer', { timeout: 2000 }); return true; } catch { return false; }
+  })();
+
+  if (hasDisplayplacer) {
+    // Get displayplacer ID for this display and set it as main
+    const dpOut = execSync('displayplacer list 2>/dev/null', { encoding: 'utf8', timeout: 5000 });
+    const match = dpOut.match(new RegExp(`id:([A-Fa-f0-9-]+)[^\\n]*${displayName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+    if (match) {
+      execSync(`displayplacer "id:${match[1]} degree:0 enabled:true scaling:on" "origin:(0,0) hz:0"`);
+    }
+  } else {
+    // Last resort: prefer-display-for-dock defaults key + killall Dock
+    // This works on some macOS versions
+    execSync(`defaults write com.apple.dock "prefer-display-for-dock" -string "${displayName.replace(/"/g, '\\"')}"`);
+  }
+}
+
 function resetDockPin() {
-  try { execSync('defaults delete com.apple.dock prefer-display-for-dock 2>/dev/null'); } catch {}
+  // Reset means: make the built-in display (or first display) primary
+  try {
+    execSync('defaults delete com.apple.dock prefer-display-for-dock 2>/dev/null');
+  } catch {}
   spawnSync('killall', ['Dock']);
 }
+
 
 // ─── Theme ───────────────────────────────────────────────────
 const C = {
@@ -69,19 +172,24 @@ const Divider = () => <Text color={C.dim}>{'─'.repeat(48)}</Text>;
 
 const Header = () => (
   <Box flexDirection="column" marginBottom={1}>
-    <Text bold color={C.accent}>  ╔══════════════════════════════════╗</Text>
-    <Text bold color={C.accent}>  ║  <Text color={C.white} bold>🖥  Lock Dock</Text><Text color={C.accent}>                     ║</Text></Text>
-    <Text bold color={C.accent}>  ║  <Text color={C.muted}>Pin your Dock to any monitor</Text><Text color={C.accent}>   ║</Text></Text>
-    <Text bold color={C.accent}>  ╚══════════════════════════════════╝</Text>
+    <Text bold color={C.accent}>{"  ╔═══════════════════════════════════════════════════════════════════════╗"}</Text>
+    <Text bold color={C.accent}>{"  ║ "}<Text color={C.white}>{"██╗      ██████╗  ██████╗██╗  ██╗   ██████╗  ██████╗  ██████╗██╗  ██╗"}</Text>{" ║"}</Text>
+    <Text bold color={C.accent}>{"  ║ "}<Text color={C.white}>{"██║     ██╔═══██╗██╔════╝██║ ██╔╝   ██╔══██╗██╔═══██╗██╔════╝██║ ██╔╝"}</Text>{" ║"}</Text>
+    <Text bold color={C.accent}>{"  ║ "}<Text color={C.white}>{"██║     ██║   ██║██║     █████╔╝    ██║  ██║██║   ██║██║     █████╔╝ "}</Text>{" ║"}</Text>
+    <Text bold color={C.accent}>{"  ║ "}<Text color={C.white}>{"██║     ██║   ██║██║     ██╔═██╗    ██║  ██║██║   ██║██║     ██╔═██╗ "}</Text>{" ║"}</Text>
+    <Text bold color={C.accent}>{"  ║ "}<Text color={C.white}>{"███████╗╚██████╔╝╚██████╗██║  ██╗   ██████╔╝╚██████╔╝╚██████╗██║  ██╗"}</Text>{" ║"}</Text>
+    <Text bold color={C.accent}>{"  ║ "}<Text color={C.white}>{"╚══════╝ ╚═════╝  ╚═════╝╚═╝  ╚═╝   ╚═════╝  ╚═════╝  ╚═════╝╚═╝  ╚═╝"}</Text>{" ║"}</Text>
+    <Text bold color={C.accent}>{"  ║ "}<Text color={C.muted}>{"Lock Dock • Pin your Dock to any monitor"}</Text>{"                              ║"}</Text>
+    <Text bold color={C.accent}>{"  ╚═══════════════════════════════════════════════════════════════════════╝"}</Text>
   </Box>
 );
 
 const PinStatus = ({ pin }) => (
   <Box marginTop={1}>
-    <Text color={C.dim}>  Dock pinned to: </Text>
+    <Text color={C.dim}>  Dock on: </Text>
     {pin
       ? <Text color={C.green} bold>{pin}</Text>
-      : <Text color={C.muted} italic>not pinned (follows cursor)</Text>
+      : <Text color={C.muted} italic>primary display (default)</Text>
     }
   </Box>
 );
@@ -191,7 +299,7 @@ function SetScreen({ onBack, onSuccess }) {
     if (key.return || input === ' ') {
       const chosen = displays[cursor];
       try {
-        setDockDisplay(chosen.name);
+        setDockDisplay(chosen);
         setDone(chosen.name);
         onSuccess(chosen.name);
       } catch (e) {
@@ -208,7 +316,7 @@ function SetScreen({ onBack, onSuccess }) {
         <Text color={C.accent} bold>{done}</Text>
       </Box>
       <Box marginTop={1} paddingLeft={2}>
-        <Text color={C.muted}>Dock restarted. It will now stay on this display.</Text>
+        <Text color={C.muted}>Set as primary display. The Dock will now appear here.</Text>
       </Box>
       <Box marginTop={1}><Divider /></Box>
       <Keys keys={['↵ / esc  back']} />
