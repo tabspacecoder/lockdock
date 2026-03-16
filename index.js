@@ -9,68 +9,137 @@ if (process.platform !== 'darwin') {
   process.exit(1);
 }
 
-// ─── Display Detection ────────────────────────────────────────
-// Uses Swift/osascript to get displays with their CGDisplayID,
-// then sets the primary display via CGDisplaySetMainDisplayID.
-// Setting the primary display is the ONLY reliable way to control
-// which screen macOS puts the Dock on.
+// ─── How macOS controls which screen the Dock is on ──────────
+//
+// The Dock always lives on the PRIMARY display — the one with
+// the menu bar (white bar in System Settings > Displays > Arrange).
+//
+// The ONLY reliable programmatic way to move the Dock is to use
+// `displayplacer` (github.com/jakehilborn/displayplacer) to set
+// the target display as origin (0,0), which makes it the primary.
+//
+// displayplacer reads the current layout with `displayplacer list`
+// and re-applies it with the target display moved to origin (0,0).
+
+function hasDisplayplacer() {
+  try { execSync('which displayplacer', { encoding: 'utf8', timeout: 2000 }); return true; }
+  catch { return false; }
+}
+
+function installDisplayplacer() {
+  // Try Homebrew
+  const hasBrew = (() => {
+    try { execSync('which brew', { encoding: 'utf8', timeout: 2000 }); return true; }
+    catch { return false; }
+  })();
+  if (!hasBrew) throw new Error('Homebrew not found. Install displayplacer manually:\n  brew install displayplacer');
+  execSync('brew install displayplacer', { encoding: 'utf8', timeout: 120000, stdio: 'pipe' });
+}
+
+// Parse `displayplacer list` output into structured display objects
+function parseDisplayplacerList() {
+  const raw = execSync('displayplacer list', { encoding: 'utf8', timeout: 8000 });
+
+  // Extract the command at the bottom of the output
+  const cmdMatch = raw.match(/^displayplacer (.+)$/m);
+
+  const displays = [];
+  // Each display block looks like:
+  //   Contextual screen id: <uuid>
+  //   Persistent screen id: <uuid>
+  //   Type: ...
+  //   Resolution: WxH
+  //   ...
+  //   Origin: (x,y)
+  //   ...
+  const blocks = raw.split(/\n(?=Contextual screen id:)/);
+  for (const block of blocks) {
+    const idMatch     = block.match(/Persistent screen id:\s*(\S+)/);
+    const ctxMatch    = block.match(/Contextual screen id:\s*(\S+)/);
+    const resMatch    = block.match(/Resolution:\s*(\d+x\d+)/);
+    const originMatch = block.match(/Origin:\s*\((-?\d+),(-?\d+)\)/);
+    const modeMatch   = block.match(/Current mode:\s*(\d+)/);
+    const nameMatch   = block.match(/Contextual screen id:[\s\S]*?(?:\n.*){0,3}\n.*?(?:Type|Resolution).*\n(?:.*\n)*?.*?(?:Name|localizedName):\s*(.+)/);
+
+    if (!idMatch) continue;
+
+    displays.push({
+      persistentId: idMatch[1],
+      contextualId: ctxMatch?.[1] ?? idMatch[1],
+      resolution:   resMatch?.[1] ?? '?',
+      originX:      originMatch ? parseInt(originMatch[1]) : 0,
+      originY:      originMatch ? parseInt(originMatch[2]) : 0,
+      mode:         modeMatch?.[1] ?? null,
+      isPrimary:    originMatch ? (parseInt(originMatch[1]) === 0 && parseInt(originMatch[2]) === 0) : false,
+      rawBlock:     block,
+    });
+  }
+
+  return { displays, rawCommand: cmdMatch?.[1] ?? null };
+}
+
+// Extract per-screen arguments from the raw displayplacer command string
+function parseDisplayplacerCommand(cmdStr) {
+  if (!cmdStr) return [];
+  // Each quoted arg is one screen config
+  const args = [];
+  const re = /"([^"]+)"/g;
+  let m;
+  while ((m = re.exec(cmdStr)) !== null) args.push(m[1]);
+  return args;
+}
 
 function getDisplays() {
-  // Use a Swift one-liner via swift -e to enumerate all screens
-  const swiftCode = `
-import Cocoa
-import CoreGraphics
-let screens = NSScreen.screens
-for (i, screen) in screens.enumerated() {
-  let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as! CGDirectDisplayID
-  let isPrimary = (id == CGMainDisplayID())
-  let name = screen.localizedName
-  let w = Int(screen.frame.width)
-  let h = Int(screen.frame.height)
-  print("\\(id)|\\(name)|\\(w)x\\(h)|\\(isPrimary ? "main" : "")")
-}
-`.trim();
-
-  try {
-    const raw = execSync(`swift -e '${swiftCode.replace(/'/g, "'\\''")}'`, {
-      encoding: 'utf8', timeout: 15000
-    });
-    return raw.trim().split('\n').filter(Boolean).map((line, idx) => {
-      const [id, name, resolution, primary] = line.split('|');
-      return {
-        id: parseInt(id, 10),
-        name: name ?? `Display ${idx + 1}`,
-        resolution: resolution ?? '?',
-        isPrimary: primary === 'main',
-      };
-    });
-  } catch {
-    // Fallback: system_profiler (no IDs, but still useful for display names)
+  if (hasDisplayplacer()) {
     try {
-      const raw = execSync('system_profiler SPDisplaysDataType -json 2>/dev/null', {
-        encoding: 'utf8', timeout: 8000
-      });
-      const data = JSON.parse(raw);
-      const displays = [];
-      for (const gpu of data.SPDisplaysDataType ?? []) {
-        for (const mon of gpu.spdisplays_ndrvs ?? []) {
-          displays.push({
-            id: null,
-            name:       mon._name ?? 'Unknown Display',
-            resolution: mon.spdisplays_resolution ?? '?',
-            isPrimary:  mon.spdisplays_main === 'spdisplays_yes',
-          });
+      const { displays } = parseDisplayplacerList();
+      // Also get human-readable names via system_profiler
+      let nameMap = {};
+      try {
+        const spRaw = execSync('system_profiler SPDisplaysDataType -json 2>/dev/null', {
+          encoding: 'utf8', timeout: 8000
+        });
+        const spData = JSON.parse(spRaw);
+        let idx = 0;
+        for (const gpu of spData.SPDisplaysDataType ?? []) {
+          for (const mon of gpu.spdisplays_ndrvs ?? []) {
+            nameMap[idx] = mon._name ?? null;
+            idx++;
+          }
         }
+      } catch {}
+
+      return displays.map((d, i) => ({
+        ...d,
+        name: nameMap[i] ?? `Display ${i + 1}`,
+      }));
+    } catch {}
+  }
+
+  // Fallback: system_profiler only (no IDs — cannot switch)
+  try {
+    const raw = execSync('system_profiler SPDisplaysDataType -json 2>/dev/null', {
+      encoding: 'utf8', timeout: 8000
+    });
+    const data = JSON.parse(raw);
+    const displays = [];
+    for (const gpu of data.SPDisplaysDataType ?? []) {
+      for (const mon of gpu.spdisplays_ndrvs ?? []) {
+        displays.push({
+          persistentId: null,
+          name:       mon._name ?? 'Unknown Display',
+          resolution: mon.spdisplays_resolution ?? '?',
+          isPrimary:  mon.spdisplays_main === 'spdisplays_yes',
+        });
       }
-      return displays;
-    } catch {
-      return [];
     }
+    return displays;
+  } catch {
+    return [];
   }
 }
 
 function getCurrentPin() {
-  // The primary display name is the ground truth — that's where the Dock lives
   try {
     const displays = getDisplays();
     const primary = displays.find(d => d.isPrimary);
@@ -81,78 +150,56 @@ function getCurrentPin() {
 }
 
 function setDockDisplay(display) {
-  if (display.id == null) {
-    throw new Error('Display ID not available — cannot set primary display.');
+  if (!hasDisplayplacer()) {
+    installDisplayplacer();
   }
 
-  // Use a Swift snippet to set the main display via private SkyLight API.
-  // This is the same mechanism System Preferences uses.
-  const swiftCode = `
-import Cocoa
-import CoreGraphics
-
-@_silgen_name("CGSSetMainDisplayID")
-func CGSSetMainDisplayID(_ displayID: CGDirectDisplayID)
-
-let targetID: CGDirectDisplayID = ${display.id}
-CGDisplayConfigRef.withUnsafeMutablePointer { _ in }
-var configRef: CGDisplayConfigRef?
-CGBeginDisplayConfiguration(&configRef)
-CGConfigureDisplayOrigin(configRef, targetID, 0, 0)
-CGSSetMainDisplayID(targetID)
-CGCompleteDisplayConfiguration(configRef, .permanently)
-`.trim();
-
-  try {
-    execSync(`swift -e '${swiftCode.replace(/'/g, "'\\''")}'`, {
-      encoding: 'utf8', timeout: 15000
-    });
-  } catch {
-    // CGSSetMainDisplayID approach may fail on newer macOS.
-    // Fall back: use AppleScript to click "Main Display" in System Settings
-    // which is the most reliable non-private approach available.
-    setDockDisplayViaAppleScript(display.name);
+  if (!display.persistentId) {
+    throw new Error('Display ID not available. Make sure displayplacer is installed.');
   }
-  spawnSync('killall', ['Dock']);
-}
 
-function setDockDisplayViaAppleScript(displayName) {
-  // AppleScript approach: open Displays arrangement and move the menu bar
-  // This is a UI-scripting fallback — requires Accessibility permissions
-  const script = `
-tell application "System Events"
-  tell process "System Preferences"
-    -- fallback: open displays pref pane
-  end tell
-end tell
-`.trim();
-  // If Swift private API fails, we use the most reliable fallback:
-  // write the prefer-display-for-dock key AND move the main display
-  // via displayplacer if available, otherwise inform the user
-  const hasDisplayplacer = (() => {
-    try { execSync('which displayplacer', { timeout: 2000 }); return true; } catch { return false; }
-  })();
+  // Strategy: re-run displayplacer with the target display at origin (0,0)
+  // and all other displays shifted accordingly.
+  // The screen at (0,0) becomes the primary — that's where the Dock goes.
+  const { displays, rawCommand } = parseDisplayplacerList();
+  const screenArgs = parseDisplayplacerCommand(rawCommand);
 
-  if (hasDisplayplacer) {
-    // Get displayplacer ID for this display and set it as main
-    const dpOut = execSync('displayplacer list 2>/dev/null', { encoding: 'utf8', timeout: 5000 });
-    const match = dpOut.match(new RegExp(`id:([A-Fa-f0-9-]+)[^\\n]*${displayName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
-    if (match) {
-      execSync(`displayplacer "id:${match[1]} degree:0 enabled:true scaling:on" "origin:(0,0) hz:0"`);
-    }
-  } else {
-    // Last resort: prefer-display-for-dock defaults key + killall Dock
-    // This works on some macOS versions
-    execSync(`defaults write com.apple.dock "prefer-display-for-dock" -string "${displayName.replace(/"/g, '\\"')}"`);
+  if (screenArgs.length === 0) {
+    throw new Error('Could not read display configuration from displayplacer.');
   }
+
+  // Find the target display's current origin so we can shift all others
+  const target = displays.find(d => d.persistentId === display.persistentId || d.contextualId === display.persistentId);
+  if (!target) throw new Error(`Display "${display.name}" not found in displayplacer output.`);
+
+  const shiftX = -target.originX;
+  const shiftY = -target.originY;
+
+  // Rebuild args: update each screen's origin by shifting
+  const newArgs = screenArgs.map(arg => {
+    const originMatch = arg.match(/origin:\((-?\d+),(-?\d+)\)/);
+    if (!originMatch) return arg;
+    const nx = parseInt(originMatch[1]) + shiftX;
+    const ny = parseInt(originMatch[2]) + shiftY;
+    return arg.replace(/origin:\(-?\d+,-?\d+\)/, `origin:(${nx},${ny})`);
+  });
+
+  // Build final command and execute
+  const cmd = 'displayplacer ' + newArgs.map(a => `"${a}"`).join(' ');
+  execSync(cmd, { encoding: 'utf8', timeout: 15000 });
 }
 
 function resetDockPin() {
-  // Reset means: make the built-in display (or first display) primary
+  // Move Dock to first display or built-in display
   try {
-    execSync('defaults delete com.apple.dock prefer-display-for-dock 2>/dev/null');
+    const displays = getDisplays();
+    const builtin = displays.find(d =>
+      d.name?.toLowerCase().includes('built-in') ||
+      d.name?.toLowerCase().includes('retina') ||
+      d.name?.toLowerCase().includes('macbook')
+    ) ?? displays[0];
+    if (builtin) setDockDisplay(builtin);
   } catch {}
-  spawnSync('killall', ['Dock']);
 }
 
 
@@ -308,20 +355,47 @@ function SetScreen({ onBack, onSuccess }) {
     }
   });
 
-  if (done) return (
-    <Box flexDirection="column" paddingLeft={2}>
-      <Box marginBottom={1}><Text bold color={C.green}>  ✔ Dock locked!</Text></Box>
-      <Box paddingLeft={2}>
-        <Text color={C.white}>Pinned to </Text>
-        <Text color={C.accent} bold>{done}</Text>
+  if (done) {
+    const isError = done.startsWith('ERROR:');
+    const needsDisplayplacer = done.includes('displayplacer') || done.includes('Display ID');
+    return (
+      <Box flexDirection="column" paddingLeft={2}>
+        {isError ? (
+          <>
+            <Box marginBottom={1}><Text bold color={C.yellow}>  ⚠ Could not switch Dock</Text></Box>
+            <Box paddingLeft={2} flexDirection="column">
+              {needsDisplayplacer ? (
+                <>
+                  <Text color={C.white}>Lock Dock requires <Text color={C.accent} bold>displayplacer</Text> to work.</Text>
+                  <Box marginTop={1}>
+                    <Text color={C.muted}>Install it with Homebrew and try again:</Text>
+                  </Box>
+                  <Box marginTop={1} paddingLeft={1}>
+                    <Text color={C.green}>brew install displayplacer</Text>
+                  </Box>
+                </>
+              ) : (
+                <Text color={C.muted}>{done.replace('ERROR: ', '')}</Text>
+              )}
+            </Box>
+          </>
+        ) : (
+          <>
+            <Box marginBottom={1}><Text bold color={C.green}>  ✔ Dock moved!</Text></Box>
+            <Box paddingLeft={2}>
+              <Text color={C.white}>Now on </Text>
+              <Text color={C.accent} bold>{done}</Text>
+            </Box>
+            <Box marginTop={1} paddingLeft={2}>
+              <Text color={C.muted}>The Dock is now on this display.</Text>
+            </Box>
+          </>
+        )}
+        <Box marginTop={1}><Divider /></Box>
+        <Keys keys={['↵ / esc  back']} />
       </Box>
-      <Box marginTop={1} paddingLeft={2}>
-        <Text color={C.muted}>Set as primary display. The Dock will now appear here.</Text>
-      </Box>
-      <Box marginTop={1}><Divider /></Box>
-      <Keys keys={['↵ / esc  back']} />
-    </Box>
-  );
+    );
+  }
 
   if (displays.length === 0) return (
     <Box flexDirection="column" paddingLeft={2}>
@@ -367,7 +441,7 @@ function ResetScreen({ onBack, onReset }) {
 
   if (done) return (
     <Box flexDirection="column" paddingLeft={2}>
-      <Text bold color={C.green}>  ✔ Pin removed. Dock will follow cursor.</Text>
+      <Text bold color={C.green}>  ✔ Done. Dock moved to built-in display.</Text>
       <Box marginTop={1}><Divider /></Box>
       <Keys keys={['↵  back']} />
     </Box>
@@ -375,10 +449,10 @@ function ResetScreen({ onBack, onReset }) {
 
   return (
     <Box flexDirection="column" paddingLeft={2}>
-      <Box marginBottom={1}><Text bold color={C.yellow}>  ↺ Reset Dock pin?</Text></Box>
+      <Box marginBottom={1}><Text bold color={C.yellow}>  ↺ Move Dock to built-in display?</Text></Box>
       <Divider />
       <Box marginTop={1} paddingLeft={2}>
-        <Text color={C.muted}>Removes the pinned display — Dock will follow cursor again.</Text>
+        <Text color={C.muted}>Moves the Dock back to your built-in / primary screen.</Text>
       </Box>
       <Box marginTop={2} paddingLeft={2}>
         <Text color={C.white}>Confirm?  </Text>
